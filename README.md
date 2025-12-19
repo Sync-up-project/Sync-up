@@ -63,6 +63,22 @@ docker-compose down -v
 - Backend (NestJS): http://localhost:3001
 - PostgreSQL: localhost:5432
 
-### 환경 변수
+### 환경 변수 설정
 
-각 서비스의 환경 변수는 `docker-compose.yml`에서 설정할 수 있습니다. 프로덕션 환경에서는 `.env` 파일을 사용하는 것을 권장합니다.
+프로젝트 루트에 `.env` 파일을 생성하고 환경 변수를 설정해야 합니다.
+
+```bash
+# .env.example을 복사하여 .env 파일 생성
+cp .env.example .env
+
+# 필요에 따라 .env 파일 수정
+nano .env
+```
+
+`.env` 파일에는 다음 환경 변수들이 포함되어 있습니다:
+
+- **Database**: `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`
+- **Backend**: `NODE_ENV`, `DATABASE_HOST`, `DATABASE_PORT`, `DATABASE_USER`, `DATABASE_PASSWORD`, `DATABASE_NAME`
+- **Frontend**: `NEXT_PUBLIC_API_URL`
+
+> ⚠️ `.env` 파일은 민감한 정보를 포함하므로 Git에 커밋하지 않습니다. `.env.example` 파일을 참고하세요.
