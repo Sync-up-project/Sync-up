@@ -22,11 +22,10 @@ services:
       retries: 5
 
   backend:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
+    image: node:18-alpine
     container_name: sync-up-backend
     restart: unless-stopped
+    working_dir: /app
     ports:
       - "3001:3000"
     env_file:
@@ -46,13 +45,19 @@ services:
     volumes:
       - ./backend:/app
       - /app/node_modules
+    command: sh -c "npm install && npx nest start --watch"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:3000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
 
   frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
+    image: node:18-alpine
     container_name: sync-up-frontend
     restart: unless-stopped
+    working_dir: /app
     ports:
       - "3000:3000"
     env_file:
@@ -61,13 +66,21 @@ services:
       - NODE_ENV=${NODE_ENV}
       - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     networks:
       - sync-up-network
     volumes:
       - ./frontend:/app
       - /app/node_modules
       - /app/.next
+    command: sh -c "npm install && npm run dev"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:3000 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
 
 volumes:
   postgres_data:
