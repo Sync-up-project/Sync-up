@@ -31,3 +31,38 @@ git submodule update --init --recursive
 ```bash
 git submodule update --remote
 ```
+
+## Docker Compose로 실행하기
+
+이 프로젝트는 Docker Compose를 사용하여 전체 스택을 실행할 수 있습니다.
+
+### 사전 요구사항
+
+- Docker
+- Docker Compose
+
+### 실행 방법
+
+```bash
+# 모든 서비스 빌드 및 실행
+docker-compose up -d
+
+# 로그 확인
+docker-compose logs -f
+
+# 서비스 중지
+docker-compose down
+
+# 볼륨까지 삭제하며 중지
+docker-compose down -v
+```
+
+### 서비스 포트
+
+- Frontend (Next.js): http://localhost:3000
+- Backend (NestJS): http://localhost:3001
+- PostgreSQL: localhost:5432
+
+### 환경 변수
+
+각 서비스의 환경 변수는 `docker-compose.yml`에서 설정할 수 있습니다. 프로덕션 환경에서는 `.env` 파일을 사용하는 것을 권장합니다.
