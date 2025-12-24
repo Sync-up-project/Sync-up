@@ -22,7 +22,7 @@ services:
       retries: 5
 
   backend:
-    image: node:18-alpine
+    image: node:20-alpine
     container_name: sync-up-backend
     restart: unless-stopped
     working_dir: /app
@@ -45,16 +45,20 @@ services:
     volumes:
       - ./backend:/app
       - /app/node_modules
-    command: sh -c "npm install && npx nest start --watch"
+    command: sh -c "npm install && npx prisma generate && npx nest start --watch"
     healthcheck:
-      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:3000/health || exit 1"]
+      test:
+        [
+          "CMD-SHELL",
+          "wget --no-verbose --tries=1 --spider http://localhost:3000/health || exit 1",
+        ]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 40s
 
   frontend:
-    image: node:18-alpine
+    image: node:20-alpine
     container_name: sync-up-frontend
     restart: unless-stopped
     working_dir: /app
@@ -76,7 +80,11 @@ services:
       - /app/.next
     command: sh -c "npm install && npm run dev"
     healthcheck:
-      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:3000 || exit 1"]
+      test:
+        [
+          "CMD-SHELL",
+          "wget --no-verbose --tries=1 --spider http://localhost:3000 || exit 1",
+        ]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -88,4 +96,3 @@ volumes:
 networks:
   sync-up-network:
     driver: bridge
-
