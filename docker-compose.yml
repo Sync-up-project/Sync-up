@@ -28,6 +28,7 @@ services:
     working_dir: /app
     ports:
       - "3001:3000"
+      - "5555:5555"
     env_file:
       - .env
     environment:
@@ -37,6 +38,7 @@ services:
       - DATABASE_USER=${DATABASE_USER}
       - DATABASE_PASSWORD=${DATABASE_PASSWORD}
       - DATABASE_NAME=${DATABASE_NAME}
+      - DATABASE_URL=postgresql://${DATABASE_USER}:${DATABASE_PASSWORD}@${DATABASE_HOST}:${DATABASE_PORT}/${DATABASE_NAME}?schema=public
     depends_on:
       db:
         condition: service_healthy
