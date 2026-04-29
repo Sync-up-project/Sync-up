@@ -1,3 +1,9 @@
+# 개발(dev) 전용 compose.
+# - 백/프론트는 호스트 코드를 마운트한 채로 watch 실행.
+# - node_modules 는 이름 있는 볼륨으로 캐시 → lock 미변경 시 npm ci 재실행 안 함.
+# - 무거운 시동 단계는 각 서비스의 docker/entrypoint.dev.sh 가 담당.
+# 운영 배포는 docker-compose.prod.yml 를 사용하세요.
+
 services:
   db:
     image: postgres:15-alpine
@@ -10,29 +16,33 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
     ports:
-      - "5432:5432"
+      # 외부 GUI 접속용. 보안상 호스트 로컬에만 바인딩.
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     networks:
       - sync-up-network
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-postgres}"]
       interval: 10s
       timeout: 5s
       retries: 5
 
   backend:
-    image: node:20-alpine
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
     container_name: sync-up-backend
     restart: unless-stopped
     working_dir: /app
     ports:
       - "3001:3000"
+      # Prisma Studio: docker compose exec backend npx prisma studio -p 5555 -b none
       - "5555:5555"
     env_file:
       - .env
     environment:
-      - NODE_ENV=${NODE_ENV}
+      - NODE_ENV=${NODE_ENV:-development}
       - DATABASE_HOST=${DATABASE_HOST}
       - DATABASE_PORT=${DATABASE_PORT}
       - DATABASE_USER=${DATABASE_USER}
@@ -46,21 +56,13 @@ services:
       - sync-up-network
     volumes:
       - ./backend:/app
-      - /app/node_modules
-    command: sh -c "npm install && npx prisma generate && npx nest start --watch"
-    healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "wget --no-verbose --tries=1 --spider http://localhost:3000/health || exit 1",
-        ]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
+      # node_modules 는 호스트와 분리해서 캐시 (lock 변경 시에만 재설치).
+      - backend_node_modules:/app/node_modules
 
   frontend:
-    image: node:20-alpine
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
     container_name: sync-up-frontend
     restart: unless-stopped
     working_dir: /app
@@ -69,31 +71,24 @@ services:
     env_file:
       - .env
     environment:
-      - NODE_ENV=${NODE_ENV}
+      - NODE_ENV=${NODE_ENV:-development}
       - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
+      - INTERNAL_BACKEND_URL=${INTERNAL_BACKEND_URL}
     depends_on:
-      backend:
-        condition: service_healthy
+      - backend
     networks:
       - sync-up-network
     volumes:
       - ./frontend:/app
-      - /app/node_modules
-      - /app/.next
-    command: sh -c "npm install && npm run dev"
-    healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "wget --no-verbose --tries=1 --spider http://localhost:3000 || exit 1",
-        ]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
+      - frontend_node_modules:/app/node_modules
+      # next 의 빌드 캐시도 호스트와 분리.
+      - frontend_next_cache:/app/.next
 
 volumes:
   postgres_data:
+  backend_node_modules:
+  frontend_node_modules:
+  frontend_next_cache:
 
 networks:
   sync-up-network:

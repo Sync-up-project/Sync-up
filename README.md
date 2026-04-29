@@ -34,51 +34,87 @@ git submodule update --remote
 
 ## Docker Compose로 실행하기
 
-이 프로젝트는 Docker Compose를 사용하여 전체 스택을 실행할 수 있습니다.
+이 프로젝트는 개발(dev)과 운영(prod)을 분리해 두 개의 compose 파일로 관리합니다.
+
+- `docker-compose.yml` — 개발 전용 (호스트 코드 마운트 + watch)
+- `docker-compose.prod.yml` — 운영 전용 (멀티스테이지 빌드 + standalone)
 
 ### 사전 요구사항
 
 - Docker
-- Docker Compose
+- Docker Compose v2 (`docker compose` 명령)
+- 루트에 `.env` 파일 (없으면 `cp .env.example .env`)
 
-### 실행 방법
+### 개발 모드
 
 ```bash
-# 모든 서비스 빌드 및 실행
-docker-compose up -d
+# 최초 한 번 (or Dockerfile.dev 변경 시) 이미지 빌드
+docker compose build
 
-# 로그 확인
-docker-compose logs -f
+# 백/프론트/DB 같이 실행
+docker compose up
 
-# 서비스 중지
-docker-compose down
+# 백그라운드 실행
+docker compose up -d
 
-# 볼륨까지 삭제하며 중지
-docker-compose down -v
+# 로그 보기
+docker compose logs -f backend
 ```
+
+- 호스트의 `./backend`, `./frontend` 가 컨테이너에 마운트되어 변경 시 자동 재시작.
+- `node_modules` 는 이름 있는 볼륨(`backend_node_modules`, `frontend_node_modules`)에 캐시되어
+  `package-lock.json` 이 바뀐 경우에만 `npm ci` 를 다시 돌려요.
+- `prisma generate` 도 `prisma/schema.prisma` 가 바뀐 경우에만 자동으로 다시 돌아갑니다.
+
+#### 자주 쓰는 작업
+
+```bash
+# 컨테이너 안에서 명령 실행
+docker compose exec backend npx nest --help
+docker compose exec backend npx prisma migrate dev --name <migration-name>
+
+# Prisma Studio (호스트 브라우저: http://localhost:5555)
+docker compose exec backend npx prisma studio -p 5555 -b none
+
+# 의존성/캐시까지 깨끗이 지우고 다시 시작
+docker compose down -v
+docker compose build --no-cache
+docker compose up
+```
+
+> `docker compose down` 만 하면 DB 볼륨(`postgres_data`)은 보존됩니다.
+> DB까지 초기화하고 싶을 때만 `down -v` 를 사용하세요.
+
+### 운영(prod) 모드
+
+```bash
+# 이미지 빌드 (멀티스테이지)
+docker compose -f docker-compose.prod.yml build
+
+# DB 스키마 마이그레이션 (필요 시 1회)
+docker compose -f docker-compose.prod.yml --profile migrate run --rm migrate
+
+# 서비스 기동
+docker compose -f docker-compose.prod.yml up -d
+```
+
+- 백엔드는 `nest build` 로 만들어진 `dist/main` 만 실행하고,
+  프론트엔드는 Next.js standalone 산출물(`server.js`)만 실행합니다.
+- 마이그레이션은 별도 일회성 잡(`migrate` 프로필)으로 분리되어 자동 실행되지 않습니다.
 
 ### 서비스 포트
 
 - Frontend (Next.js): http://localhost:3000
 - Backend (NestJS): http://localhost:3001
-- PostgreSQL: localhost:5432
+- Prisma Studio (개발): http://localhost:5555
+- PostgreSQL: 127.0.0.1:5432 (개발 모드에서 호스트 로컬에만 바인딩)
 
-### 환경 변수 설정
+### 환경 변수
 
-프로젝트 루트에 `.env` 파일을 생성하고 환경 변수를 설정해야 합니다.
+프로젝트 루트의 `.env` 가 모든 서비스에서 읽힙니다. 처음에는 `.env.example` 을 복사해 사용하세요.
 
 ```bash
-# .env.example을 복사하여 .env 파일 생성
 cp .env.example .env
-
-# 필요에 따라 .env 파일 수정
-nano .env
 ```
 
-`.env` 파일에는 다음 환경 변수들이 포함되어 있습니다:
-
-- **Database**: `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`
-- **Backend**: `NODE_ENV`, `DATABASE_HOST`, `DATABASE_PORT`, `DATABASE_USER`, `DATABASE_PASSWORD`, `DATABASE_NAME`
-- **Frontend**: `NEXT_PUBLIC_API_URL`
-
-> ⚠️ `.env` 파일은 민감한 정보를 포함하므로 Git에 커밋하지 않습니다. `.env.example` 파일을 참고하세요.
+> ⚠️ `.env` 는 민감한 값을 포함하므로 커밋하지 마세요. 운영 환경에서는 별도 비밀 관리 도구를 권장합니다.
