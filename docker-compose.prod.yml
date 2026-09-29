@@ -1,9 +1,18 @@
 # 운영(prod) compose.
-# 사용 예:
+#
+# 자동 배포(CD): GitHub Actions 가 GHCR 이미지를 받아 deploy/deploy.sh 로 교체합니다.
+#   이미지 태그는 .deploy.env 의 BACKEND_TAG / FRONTEND_TAG (없으면 main).
+#
+# 수동 빌드/실행도 가능합니다 (서버에서 직접 빌드):
 #   docker compose -f docker-compose.prod.yml build
 #   docker compose -f docker-compose.prod.yml up -d
 # 마이그레이션:
 #   docker compose -f docker-compose.prod.yml --profile migrate run --rm migrate
+#
+# 외부 진입점은 nginx(80) 하나입니다. (deploy/nginx/default.conf)
+#   /          → frontend
+#   /backend/* → backend
+# frontend/backend 포트는 서버 내부 디버깅용으로 127.0.0.1 에만 바인딩합니다.
 
 services:
   db:
@@ -30,6 +39,7 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+    image: ${BACKEND_IMAGE:-ghcr.io/sync-up-project/backend}:${BACKEND_TAG:-main}
     profiles: ["migrate"]
     env_file:
       - .env
@@ -47,7 +57,7 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    image: sync-up-backend:latest
+    image: ${BACKEND_IMAGE:-ghcr.io/sync-up-project/backend}:${BACKEND_TAG:-main}
     restart: unless-stopped
     env_file:
       - .env
@@ -60,7 +70,7 @@ services:
     networks:
       - sync-up-network
     ports:
-      - "3001:3000"
+      - "127.0.0.1:3001:3000"
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- --tries=1 http://localhost:3000/health || exit 1"]
       interval: 30s
@@ -72,21 +82,37 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
-    image: sync-up-frontend:latest
+      args:
+        NEXT_PUBLIC_API_URL: ${PROD_PUBLIC_API_URL:-}
+    image: ${FRONTEND_IMAGE:-ghcr.io/sync-up-project/frontend}:${FRONTEND_TAG:-main}
     restart: unless-stopped
     env_file:
       - .env
     environment:
       - NODE_ENV=production
-      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
-      - INTERNAL_BACKEND_URL=${INTERNAL_BACKEND_URL}
+      # NEXT_PUBLIC_API_URL 은 빌드 시점 값이라 여기서 넣어도 브라우저 번들에 반영되지 않습니다.
+      # 바꾸려면 build args 로 넘기세요. (비우면 "/backend" 사용)
+      - INTERNAL_BACKEND_URL=${INTERNAL_BACKEND_URL:-http://backend:3000}
     depends_on:
       backend:
         condition: service_healthy
     networks:
       - sync-up-network
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      - frontend
+      - backend
+    networks:
+      - sync-up-network
+    ports:
+      - "80:80"
+    volumes:
+      - ./deploy/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
 
 volumes:
   postgres_data:

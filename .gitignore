@@ -2,6 +2,8 @@
 .env
 .env.local
 .env.*.local
+# 서버에서 deploy/deploy.sh 가 기록하는 현재 배포 버전
+.deploy.env
 
 # Dependencies
 node_modules/

@@ -1,0 +1,148 @@
+# 운영 배포 (CD)
+#
+# 루트 레포 main 에 서브모듈 포인터 갱신 등이 push 되면, 포인터가 가리키는 커밋의 이미지를
+# 운영 서버에 배포합니다. (이미지는 backend/frontend 레포의 CI 가 GHCR 에 올려 둡니다)
+#
+#   backend/frontend main push → 각 레포 CI 가 이미지 빌드·업로드 (sha-<커밋SHA>)
+#   루트 레포에서 서브모듈 포인터 갱신 push → 이 워크플로 → SSH → deploy/deploy.sh
+#
+# 필요한 설정 (Settings → Environments → production):
+#   Secrets  SSH_HOST         서버 주소 (탄력적 IP 또는 도메인)
+#            SSH_USER         예) ubuntu
+#            SSH_PRIVATE_KEY  배포 전용 개인키
+#            SSH_KNOWN_HOSTS  (선택) `ssh-keyscan <호스트>` 결과. 없으면 실행 시점에 스캔
+#            GHCR_TOKEN       (선택) GHCR 패키지가 private 일 때 read:packages 권한 토큰
+#   Variables SSH_PORT        (선택) 기본 22
+#            DEPLOY_PATH      (선택) 서버의 Sync-up 경로. 기본 /home/ubuntu/Sync-up
+#
+# SSH_HOST / SSH_PRIVATE_KEY 가 없으면 배포 단계는 실패하지 않고 건너뜁니다.
+
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - backend
+      - frontend
+      - docker-compose.prod.yml
+      - deploy/**
+      - .github/workflows/deploy.yml
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  BACKEND_IMAGE: ghcr.io/sync-up-project/backend
+  FRONTEND_IMAGE: ghcr.io/sync-up-project/frontend
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    environment: production
+    steps:
+      - name: Check deploy target
+        id: target
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          if [ -n "$SSH_HOST" ] && [ -n "$SSH_PRIVATE_KEY" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::SSH_HOST / SSH_PRIVATE_KEY 가 설정되지 않아 배포를 건너뜁니다."
+          fi
+
+      # 서브모듈 내용은 필요 없고, 포인터(커밋 SHA)만 읽으면 됩니다.
+      - uses: actions/checkout@v4
+        if: steps.target.outputs.enabled == 'true'
+
+      - name: Resolve image tags from submodule pointers
+        if: steps.target.outputs.enabled == 'true'
+        id: tags
+        run: |
+          backend_sha=$(git ls-tree HEAD backend | awk '{print $3}')
+          frontend_sha=$(git ls-tree HEAD frontend | awk '{print $3}')
+          test -n "$backend_sha" && test -n "$frontend_sha"
+          echo "backend=sha-$backend_sha" >> "$GITHUB_OUTPUT"
+          echo "frontend=sha-$frontend_sha" >> "$GITHUB_OUTPUT"
+          echo "backend  → $BACKEND_IMAGE:sha-$backend_sha"
+          echo "frontend → $FRONTEND_IMAGE:sha-$frontend_sha"
+
+      - name: Log in to GHCR (private packages only)
+        if: steps.target.outputs.enabled == 'true'
+        env:
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+        run: |
+          if [ -n "$GHCR_TOKEN" ]; then
+            echo "$GHCR_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          fi
+
+      # 서브모듈 main 에 push 직후 포인터를 올리면 이미지 빌드가 아직 진행 중일 수 있어 최대 15분 기다립니다.
+      - name: Wait for images
+        if: steps.target.outputs.enabled == 'true'
+        run: |
+          for image in "$BACKEND_IMAGE:${{ steps.tags.outputs.backend }}" \
+                       "$FRONTEND_IMAGE:${{ steps.tags.outputs.frontend }}"; do
+            for i in $(seq 1 30); do
+              if docker manifest inspect "$image" > /dev/null 2>&1; then
+                echo "found: $image"
+                continue 2
+              fi
+              echo "waiting for $image ($i/30)"
+              sleep 30
+            done
+            echo "::error::$image 이미지가 없습니다. 해당 레포의 CI(publish) 가 성공했는지 확인하세요."
+            exit 1
+          done
+
+      - name: Set up SSH
+        if: steps.target.outputs.enabled == 'true'
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+          SSH_PORT: ${{ vars.SSH_PORT || '22' }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          if [ -n "$SSH_KNOWN_HOSTS" ]; then
+            printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          else
+            ssh-keyscan -p "$SSH_PORT" -H "$SSH_HOST" > ~/.ssh/known_hosts
+          fi
+
+      - name: Deploy
+        if: steps.target.outputs.enabled == 'true'
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER || 'ubuntu' }}
+          SSH_PORT: ${{ vars.SSH_PORT || '22' }}
+          DEPLOY_PATH: ${{ vars.DEPLOY_PATH || '/home/ubuntu/Sync-up' }}
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+          BACKEND_TAG: ${{ steps.tags.outputs.backend }}
+          FRONTEND_TAG: ${{ steps.tags.outputs.frontend }}
+        run: |
+          ssh_run() {
+            ssh -i ~/.ssh/deploy_key -p "$SSH_PORT" -o BatchMode=yes "$SSH_USER@$SSH_HOST" "$@"
+          }
+
+          # 토큰은 명령줄이 아니라 표준입력으로 넘겨 서버 프로세스 목록에 남지 않게 합니다.
+          if [ -n "$GHCR_TOKEN" ]; then
+            printf '%s' "$GHCR_TOKEN" | ssh_run "docker login ghcr.io -u '${{ github.actor }}' --password-stdin"
+          fi
+
+          # 서버에는 compose / nginx 설정 / 배포 스크립트만 필요합니다 (서브모듈 소스 불필요).
+          ssh_run "cd '$DEPLOY_PATH' && git pull --ff-only && ./deploy/deploy.sh '$BACKEND_TAG' '$FRONTEND_TAG'"
+
+      - name: Clean up SSH key
+        if: always() && steps.target.outputs.enabled == 'true'
+        run: rm -f ~/.ssh/deploy_key
