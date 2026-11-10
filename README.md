@@ -85,27 +85,39 @@ docker compose up
 > `docker compose down` 만 하면 DB 볼륨(`postgres_data`)은 보존됩니다.
 > DB까지 초기화하고 싶을 때만 `down -v` 를 사용하세요.
 
-### 운영(prod) 모드
+### 운영(prod) 모드 — 블루-그린 무중단 배포
+
+운영은 GHCR 이미지를 받아 `deploy/deploy.sh` 로 배포합니다. backend·frontend 를 **blue / green 두 벌**로 두고,
+대기 중인 색에 새 버전을 띄워 healthy 가 되면 nginx 가 가리키는 색을 바꿉니다. (`nginx -s reload` 는 처리 중인 요청을 끊지 않음)
 
 ```bash
-# 이미지 빌드 (멀티스테이지)
-docker compose -f docker-compose.prod.yml build
-
-# DB 스키마 마이그레이션 (필요 시 1회)
-docker compose -f docker-compose.prod.yml --profile migrate run --rm migrate
-
-# 서비스 기동
-docker compose -f docker-compose.prod.yml up -d
+./deploy/deploy.sh <backend 태그> <frontend 태그>   # 새 버전 배포 (보통 GitHub Actions 가 실행)
+./deploy/deploy.sh rollback                         # 직전 색으로 되돌리기 (수 초)
+./deploy/deploy.sh status                           # 활성 색, 색별 태그, 컨테이너 상태
 ```
 
-- 백엔드는 `nest build` 로 만들어진 `dist/main` 만 실행하고,
-  프론트엔드는 Next.js standalone 산출물(`server.js`)만 실행합니다.
-- 마이그레이션은 별도 일회성 잡(`migrate` 프로필)으로 분리되어 자동 실행되지 않습니다.
+| 단계 | 하는 일 | 실패하면 |
+|---|---|---|
+| 1 | 대기 색에 이미지 pull → DB 마이그레이션 | 대기 색만 정리. 운영 중인 색은 그대로 |
+| 2 | 대기 색 backend → frontend 기동, Docker 헬스체크 healthy 대기 | 위와 같음 |
+| 3 | nginx upstream 을 대기 색으로 바꾸고 reload | upstream 되돌림 |
+| 4 | nginx 를 거쳐 스모크 테스트 (내부 8081 포트) | upstream 되돌림 |
+| 5 | 드레이닝(기본 15초) 후 이전 색 중지. 지우지 않고 rollback 용으로 보관 | - |
+
+- 백엔드는 `dist/src/main`, 프론트엔드는 Next.js standalone `server.js` 를 실행합니다.
+- 앱 컨테이너는 포트를 열지 않습니다. 디버깅은 `docker compose ... exec` 로 합니다.
+- frontend 는 시작할 때 자기 버전의 `/_next/static` 을 공유 볼륨에 복사하고, nginx 가 직접 서빙합니다.
+  배포 직전에 페이지를 연 사용자가 옛 JS 파일을 요청해도 404 가 나지 않습니다.
+- 처음 블루-그린으로 배포할 때(이전 단일 구성에서 넘어올 때) 한 번만 1~2초 끊길 수 있습니다.
+
+> ⚠️ **마이그레이션은 반드시 이전 버전과 호환되게 작성하세요.** 전환 직전까지 이전 버전이 같은 DB 로 서비스하고,
+> 롤백해도 마이그레이션은 되돌리지 않습니다. 컬럼·테이블 **추가**는 자유롭게, **삭제·이름 변경**은 두 번 이상의 배포로 나눕니다.
+> (예: 새 컬럼 추가 + 양쪽에 쓰기 → 새 컬럼만 사용 → 옛 컬럼 삭제)
 
 #### API 주소 구성 (운영)
 
 외부 진입점은 nginx(80) 하나이고, 프론트/백엔드를 같은 도메인 뒤에 둡니다.
-설정 파일: [`deploy/nginx/default.conf`](deploy/nginx/default.conf)
+설정 파일: [`deploy/nginx/conf.d/default.conf`](deploy/nginx/conf.d/default.conf)
 
 | 브라우저 요청 | 전달 대상 |
 |---|---|
@@ -173,7 +185,7 @@ nginx 를 띄우기 전(80 포트가 비어 있을 때) 인증서를 발급합�
 sudo certbot certonly --standalone -d <도메인>
 ```
 
-`deploy/nginx/default.conf` 의 `server { listen 80; server_name _;` 부분을 아래로 바꿉니다.
+`deploy/nginx/conf.d/default.conf` 의 첫 번째 `server { listen 80; server_name _;` 부분을 아래로 바꿉니다. (아래쪽 `listen 8081` 내부 서버는 그대로 둠)
 두 `location` 블록은 그대로 둡니다.
 
 ```nginx
@@ -199,10 +211,12 @@ server {
 ```yaml
     ports:
       - "80:80"
-      - "443:443"
+      - "443:443"                                  # 추가
     volumes:
-      - ./deploy/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
-      - /etc/letsencrypt:/etc/letsencrypt:ro
+      - ./deploy/nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./deploy/nginx/active:/etc/nginx/syncup:ro
+      - next_static:/var/www/next-static:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro       # 추가
 ```
 
 > ⚠️ 자동 배포는 서버에서 `git pull --ff-only` 를 합니다. 서버에서 이 두 파일을 직접 고쳐 두면
@@ -211,7 +225,7 @@ server {
 인증서는 90일마다 갱신해야 하므로 cron 에 등록합니다. (갱신 중에는 80 포트를 비워야 해서 nginx 를 잠시 멈춤)
 
 ```bash
-sudo certbot renew --pre-hook "docker compose -f /home/ubuntu/Sync-up/docker-compose.prod.yml stop nginx" --post-hook "docker compose -f /home/ubuntu/Sync-up/docker-compose.prod.yml start nginx"
+sudo certbot renew --pre-hook "cd /home/ubuntu/Sync-up && docker compose -f docker-compose.prod.yml --env-file .env --env-file .deploy.env stop nginx" --post-hook "cd /home/ubuntu/Sync-up && docker compose -f docker-compose.prod.yml --env-file .env --env-file .deploy.env start nginx"
 ```
 
 **4. 서버 준비** (Docker 는 공식 문서의 Ubuntu 설치 방법으로 설치)
@@ -225,18 +239,11 @@ cp .env.example .env && vi .env
 
 이후 첫 배포는 아래 [CI/CD](#cicd) 설정을 마친 뒤 GitHub Actions 의 **Deploy → Run workflow** 로 실행합니다.
 
-<details>
-<summary>자동 배포 없이 서버에서 직접 빌드·실행하는 방법</summary>
+자동 배포 없이 서버에서 직접 배포하려면 GHCR 이미지 태그를 지정해 스크립트를 실행합니다.
 
 ```bash
-git clone --recurse-submodules https://github.com/Sync-up-project/Sync-up.git && cd Sync-up
-cp .env.example .env && vi .env
-docker compose -f docker-compose.prod.yml build
-docker compose -f docker-compose.prod.yml --profile migrate run --rm migrate
-docker compose -f docker-compose.prod.yml up -d
+./deploy/deploy.sh sha-<backend 커밋SHA> sha-<frontend 커밋SHA>
 ```
-
-</details>
 
 **5. 올린 뒤 확인**
 
@@ -272,9 +279,10 @@ main push     → 이미지 빌드 → GHCR 업로드   ──┐
                 (sha-<커밋SHA>, main)          │
                                               └─→   서브모듈 포인터 갱신 push
                                                     → Deploy 워크플로
-                                                    → SSH → deploy/deploy.sh
-                                                    → pull → migrate → 교체 → 헬스체크
-                                                    → 실패 시 직전 버전으로 자동 롤백
+                                                    → SSH → deploy/deploy.sh (블루-그린)
+                                                    → 대기 색에 pull → migrate → 기동 → healthy
+                                                    → nginx 전환 → 스모크 테스트 → 이전 색 중지
+                                                    → 어느 단계든 실패하면 운영 중인 색은 그대로
 ```
 
 - **배포 트리거는 루트 레포의 서브모듈 포인터 갱신**입니다. backend/frontend 에 push 만 하면
@@ -312,15 +320,22 @@ main push     → 이미지 빌드 → GHCR 업로드   ──┐
 
 ### 서버에서 직접 다룰 때
 
-현재 배포된 이미지 태그는 서버의 `.deploy.env` 에 기록됩니다. compose 를 직접 실행할 때는 이 파일을 함께 넘겨야
-같은 버전이 유지됩니다.
+배포 상태(활성 색, 색별 이미지 태그)는 서버의 `.deploy.env` 에, nginx 가 가리키는 색은 `deploy/nginx/active/upstream.conf` 에 있습니다.
+둘 다 `deploy.sh` 가 관리하므로 손으로 고치지 마세요.
 
 ```bash
-docker compose -f docker-compose.prod.yml --env-file .env --env-file .deploy.env ps
+./deploy/deploy.sh status                                    # 현재 상태
+./deploy/deploy.sh rollback                                  # 직전 색으로 즉시 되돌리기
+./deploy/deploy.sh sha-<backend SHA> sha-<frontend SHA>      # 특정 버전 배포
 ```
 
-특정 버전으로 수동 배포/롤백:
+compose 를 직접 실행할 때는 두 env 파일을 함께 넘겨야 같은 버전이 유지됩니다.
 
 ```bash
-./deploy/deploy.sh sha-<backend 커밋SHA> sha-<frontend 커밋SHA>
+docker compose -f docker-compose.prod.yml --env-file .env --env-file .deploy.env logs --tail 100 backend-blue
 ```
+
+| 환경 변수 (deploy.sh) | 기본값 | 의미 |
+|---|---|---|
+| `HEALTH_TIMEOUT` | 180 | 새 색이 healthy 가 될 때까지 기다리는 최대 초 |
+| `DRAIN_SECONDS` | 15 | 전환 후 이전 색을 멈추기 전 기다리는 초 |
